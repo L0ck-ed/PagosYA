@@ -1,0 +1,71 @@
+
+name: deploy
+
+on:
+  push:
+    branches:
+      - main
+
+concurrency:
+  group: pagosya-deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      # Descargar el código del repositorio
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Iniciar sesión en Docker Hub
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      # Obtener el hash corto del commit
+      - name: Generate image tag
+        run: |
+          TAG="${GITHUB_SHA:0:7}"
+          echo "TAG=$TAG" >> "$GITHUB_ENV"
+          echo "IMAGE=${{ secrets.DOCKERHUB_USERNAME }}/pagosya-api:$TAG" >> "$GITHUB_ENV"
+
+      # Construir la imagen Docker
+      - name: Build Docker image
+        run: |
+          docker build --build-arg APP_VERSION="$TAG" -t "$IMAGE" app/
+
+      # Arrancar el contenedor
+      - name: Run container
+        run: |
+          docker run -d --name pagosya-api -p 8080:8000 "$IMAGE"
+
+      # Comprobar que la API funciona
+      - name: Smoke test
+        run: |
+          for i in $(seq 1 30); do
+            if curl -fsS --max-time 2 http://localhost:8080/; then
+              echo "Smoke test exitoso"
+              exit 0
+            fi
+            sleep 1
+          done
+
+          echo "Smoke test fallido"
+          docker logs pagosya-api
+          exit 1
+
+      # Publicar únicamente si las pruebas pasan
+      - name: Push image to Docker Hub
+        if: success()
+        run: |
+          docker push "$IMAGE"
+
+      # Limpiar el contenedor
+      - name: Cleanup
+        if: always()
+        run: |
+          docker rm -f pagosya-api || true
